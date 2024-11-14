@@ -1,0 +1,6 @@
+[submodule "src/yolo_ros"]
+	path = src/yolo_ros
+	url = git@github.com:mgonzs13/yolo_ros.git
+[submodule "src/ORB_SLAM3_ROS2"]
+	path = src/ORB_SLAM3_ROS2
+	url = git@github.com:zang09/ORB_SLAM3_ROS2.git
