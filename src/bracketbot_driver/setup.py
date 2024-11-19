@@ -21,7 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'bracketbot_driver_node = bracketbot_driver.bracketbot_driver_node:main',
-            'lqr_balance_with_input_node = bracketbot_driver.bracketbot_driver.lqr_balance_with_input_node:main'
+            'lqr_balance_with_input_node = bracketbot_driver.lqr_balance_with_input_node:main'
         ],
     },
 )

@@ -5,19 +5,15 @@ import numpy as np
 import sys
 import os
 import matplotlib.pyplot as plt
-from imu import FilteredLSM6DS3
-from odrive_uart import ODriveUART, reset_odrive
-from lqr import LQR_gains
+from .imu import FilteredLSM6DS3
+from .odrive_uart import ODriveUART, reset_odrive
+from .lqr import LQR_gains
 import json
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64, Bool
 from geometry_msgs.msg import Twist
 
-# For keyboard input + joystick input
-import select
-import struct
-import fcntl
 
 # WHEEL_RADIUS = 6.5 * 0.0254 / 2  # 6.5 inches diameter converted to meters
 WHEEL_RADIUS = 0.1546 / 2 # 154.6 mm diameter converted to meters
@@ -28,76 +24,6 @@ RPM_TO_METERS_PER_SECOND = WHEEL_RADIUS * 2 * np.pi / 60
 MAX_TORQUE = 2.5  # Nm, adjust based on your motor's specifications
 MAX_SPEED = 0.4  # m/s, set maximum linear speed
 
-class InputHandler:
-    def update(self):
-        pass
-    
-    def stop(self):
-        pass
-
-    # Define attributes
-    yaw_control_input = 0.0
-    right_trigger = 0.0
-    left_trigger = 0.0
-    dpad_up = False
-    dpad_down = False
-
-class JoystickInputHandler(InputHandler):
-    def __init__(self):
-        self.yaw_control_input = 0.0
-        self.right_trigger = 0.0
-        self.left_trigger = 0.0
-        self.dpad_up = False
-        self.dpad_down = False
-
-        self.jsdev = None
-        self.setup_joystick()
-
-    def stop(self):
-        if self.jsdev is not None:
-            self.jsdev.close()
-
-    def setup_joystick(self):
-        try:
-            self.jsdev = open('/dev/input/js0', 'rb')
-        except FileNotFoundError:
-            print("Joystick not found at /dev/input/js0")
-            sys.exit(1)
-
-        # Get the controller name
-        buf = bytearray(64)
-        JSIOCGNAME = 0x80006a13 + (len(buf) << 16)
-        fcntl.ioctl(self.jsdev, JSIOCGNAME, buf)
-        controller_name = buf.rstrip(b'\x00').decode('utf-8')
-        print(f"Joystick found: {controller_name}")
-
-        # Set the joystick device to non-blocking mode
-        fd = self.jsdev.fileno()
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    def update(self):
-        # Read joystick input
-        rlist, _, _ = select.select([self.jsdev], [], [], 0.0)
-        if self.jsdev in rlist:
-            evbuf = self.jsdev.read(8)
-            while evbuf:
-                time_, value, type_, number = struct.unpack('IhBB', evbuf)
-                if type_ & 0x02:  # JS_EVENT_AXIS
-                    if number == 0:  # Left stick X-axis
-                        self.yaw_control_input = - value / 32767.0  # Normalize to -1.0 to 1.0
-                    elif number == 4:  # Right trigger
-                        self.right_trigger = (value + 32768) / 65535.0  # Normalize to 0.0 to 1.0
-                    elif number == 5:  # Left trigger
-                        self.left_trigger = (value + 32768) / 65535.0  # Normalize to 0.0 to 1.0
-                    elif number == 7:  # D-pad up/down
-                        if value < 0:
-                            self.dpad_up = True
-                        elif value > 0:
-                            self.dpad_down = True
-                        else:
-                            self.dpad_up = self.dpad_down = False
-                evbuf = self.jsdev.read(8)
 
 class BracketBotBalanceNode(Node):
     def __init__(self):
@@ -125,6 +51,7 @@ class BracketBotBalanceNode(Node):
 
         # Initialize components
         self.imu = FilteredLSM6DS3()
+        self.imu.calibrate()
         self.setup_controllers()
         self.setup_motors()
         
@@ -132,6 +59,9 @@ class BracketBotBalanceNode(Node):
         self.zero_angle = 0.0
         self.desired_vel = 0.0
         self.desired_yaw_rate = 0.0
+        self.desired_yaw = 0.0
+        self.desired_pos = 0.0
+        self.last_timestamp = time.time()
         
         # Create timer for control loop
         self.timer = self.create_timer(self.dt, self.control_loop)
@@ -155,7 +85,7 @@ class BracketBotBalanceNode(Node):
         time.sleep(1)
 
         try:
-            with open('motor_dir.json', 'r') as f:
+            with open('/home/gongster/quickstart/motor_dir.json', 'r') as f:
                 motor_dirs = json.load(f)
                 self.left_dir = motor_dirs['left']
                 self.right_dir = motor_dirs['right']
@@ -216,6 +146,19 @@ class BracketBotBalanceNode(Node):
 
     def control_loop(self):
         try:
+            # If no command for too long, stop new commands
+                    # If no command for too long, start ramping down the desired velocities
+
+            time_since_last_cmd = time.time() - self.last_timestamp
+
+            if time_since_last_cmd > 0.1:
+                self.get_logger().debug("No recent commands, ramping down desired velocities.")
+                # Implement ramp-down towards zero
+                self.desired_vel = 0.0
+                self.desired_yaw_rate = 0.0
+
+            self.desired_yaw += 3 * self.desired_yaw_rate * self.dt
+            self.desired_pos += 3 * self.desired_vel * self.dt
             # Get current state
             current_pitch = self.imu.robot_angle()
             current_yaw_rate = -self.imu.gyro_RAW[2]
@@ -226,6 +169,8 @@ class BracketBotBalanceNode(Node):
             l_vel = self.motor_controller.get_speed_rpm_left() * RPM_TO_METERS_PER_SECOND
             l_pos = self.motor_controller.get_position_turns_left()
             r_pos = self.motor_controller.get_position_turns_right()
+            
+            self.get_logger().info(f'Left position: {l_pos:.3f}, Right position: {r_pos:.3f}')
 
             current_vel = (l_vel + r_vel) / 2
             current_pos = ((l_pos + r_pos) / 2) * MOTOR_TURNS_TO_LINEAR_POS - self.start_pos
@@ -244,9 +189,12 @@ class BracketBotBalanceNode(Node):
             ])
             
             desired_state = np.array([
-                0, self.desired_vel, self.zero_angle*np.pi/180,
-                0, 0, self.desired_yaw_rate
+                self.desired_pos, self.desired_vel, self.zero_angle*np.pi/180,
+                0, self.desired_yaw, self.desired_yaw_rate
             ])
+            self.get_logger().info(f'Current State: {current_state}')
+            self.get_logger().info(f'Desired State: {desired_state}')
+
 
             state_error = (current_state - desired_state).reshape((6,1))
             
